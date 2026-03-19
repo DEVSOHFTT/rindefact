@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <base target="_top">
+  <!--
+    HtmlService resuelve los includes por NOMBRE DE ARCHIVO, no por ruta.
+    CLASP sube todo lo que está en rootDir (src/) como archivos planos al
+    proyecto GAS — sin estructura de carpetas. Por eso include('styles') y
+    include('app') funcionan igual sin importar la estructura local del repo.
+  -->
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <?!= include('client/styles/global.css') ?>
+</head>
+
+<body class="text-slate-800" onload="cargarDatosCache()">
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       CABECERA DE IMPRESIÓN (visible solo con @media print)
+  ════════════════════════════════════════════════════════════════════════ -->
+  <div class="hidden print-header p-4">
+    <div class="flex justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-bold text-blue-900 uppercase">Reporte de Rendición</h1>
+        <p class="text-sm text-slate-500 font-bold tracking-widest">SISTEMA RINDE FACT | DEVSOHTFT STUDIO</p>
+      </div>
+      <div class="text-right">
+        <p id="print-fecha" class="text-sm font-bold"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       BARRA DE NAVEGACIÓN SUPERIOR
+  ════════════════════════════════════════════════════════════════════════ -->
+  <header class="h-16 bg-white border-b flex items-center justify-between px-8 no-print shadow-sm z-20">
+    <div class="flex items-center gap-3">
+      <img src="https://github.com/DEVSOHFTT/rindefact/blob/main/devsohfttLogo.png?raw=true"
+           alt="Devsohftt Logo"
+           class="h-10 w-10 rounded-full">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-blue-800">Rinde Fact</h1>
+        <span class="text-[10px] uppercase text-slate-400 font-bold">by Devsohftt</span>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-4">
+      <button onclick="limpiarTodo()"
+              class="text-[10px] font-bold text-red-400 hover:text-red-600 uppercase tracking-tighter no-print"
+              title="Borrar todo y empezar de cero">
+        Borrar Todo 🗑️
+      </button>
+
+      <div class="flex items-center gap-3 bg-slate-100 p-2 rounded-xl no-print" title="Alternar modo de selección">
+        <span class="text-[10px] font-bold uppercase text-slate-500">Auto</span>
+        <label class="switch" aria-label="Modo manual">
+          <input type="checkbox" id="modoManualToggle" onchange="cambiarModo()">
+          <span class="slider"></span>
+        </label>
+        <span class="text-[10px] font-bold uppercase text-slate-500">Manual</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       LAYOUT PRINCIPAL (Sidebar + Panel de resultados)
+  ════════════════════════════════════════════════════════════════════════ -->
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- ── SIDEBAR ─────────────────────────────────────────────────────── -->
+    <aside class="sidebar flex flex-col no-print" aria-label="Panel de facturas">
+
+      <div id="controlsContainer" class="p-6 border-b space-y-4">
+        <div class="space-y-2">
+          <input type="text"
+                 id="detalleFactura"
+                 placeholder="Detalle (ej: EPEC)"
+                 class="w-full p-2.5 text-sm border rounded-lg outline-none focus:border-blue-800"
+                 autocomplete="off">
+          <div class="flex gap-2">
+            <input type="number"
+                   step="0.01"
+                   min="0.01"
+                   id="montoFactura"
+                   placeholder="0.00"
+                   class="flex-1 p-2.5 text-sm border rounded-lg outline-none focus:border-blue-800 font-semibold"
+                   onkeypress="if(event.key==='Enter') agregarFactura()">
+            <button onclick="agregarFactura()"
+                    class="bg-blue-800 text-white px-5 rounded-lg font-bold hover:bg-blue-900 shadow-sm text-xl"
+                    title="Agregar factura">+</button>
+          </div>
+        </div>
+        <input type="text"
+               id="buscador"
+               placeholder="🔍 Buscar factura..."
+               class="w-full p-2 text-xs bg-slate-50 border rounded-lg outline-none"
+               oninput="renderizarListaPrincipal()"
+               autocomplete="off">
+      </div>
+
+      <div class="px-6 py-3 bg-blue-50 border-b flex justify-between items-center">
+        <span class="text-[10px] font-bold uppercase text-blue-900">Total Ingresado:</span>
+        <span id="labelTotalIngresado" class="font-bold text-blue-900">$ 0,00</span>
+      </div>
+
+      <div id="listaPrincipal"
+           class="p-4 space-y-2 flex-1 overflow-y-auto bg-slate-50/50"
+           aria-live="polite"
+           aria-label="Lista de facturas"></div>
+    </aside>
+
+    <!-- ── PANEL PRINCIPAL ─────────────────────────────────────────────── -->
+    <main id="mainPanel" class="main-content" aria-label="Panel de resultados">
+      <div class="scrollable-area">
+        <div class="max-w-4xl mx-auto">
+
+          <!-- Input del tope -->
+          <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 mb-8 text-center">
+            <input type="text"
+                   id="detalleTope"
+                   placeholder="Nombre de la Rendición (Opcional)"
+                   class="text-sm font-bold text-blue-900 uppercase tracking-widest text-center border-none focus:ring-0 mb-2 w-full no-print"
+                   onchange="guardarCache()"
+                   autocomplete="off">
+            <p id="print-detalleTope" class="hidden text-center text-lg font-bold text-blue-900 uppercase mb-4"></p>
+
+            <label for="topeObjetivo"
+                   class="block text-[10px] font-bold uppercase text-slate-400 mb-1 tracking-widest no-print">
+              Tope de Rendición
+            </label>
+            <div class="flex items-baseline justify-center gap-2">
+              <span class="text-3xl font-light text-slate-300" aria-hidden="true">$</span>
+              <input type="number"
+                     step="0.01"
+                     min="0"
+                     id="topeObjetivo"
+                     placeholder="0.00"
+                     class="text-5xl font-bold border-none focus:ring-0 p-0 text-center text-slate-900 w-full"
+                     onkeypress="if(event.key==='Enter') this.blur();"
+                     onchange="recalcular()">
+            </div>
+          </div>
+
+          <!-- Panel de resultados -->
+          <div id="resultadoBox" class="hidden pb-10">
+            <div class="flex justify-between items-center mb-6 no-print">
+              <h3 class="text-xl font-bold text-slate-700">Comprobantes Seleccionados</h3>
+              <div class="flex gap-2">
+                <button id="btnRefresh"
+                        onclick="recalcular(true)"
+                        class="bg-white border border-slate-300 p-2.5 rounded-xl hover:bg-slate-50 transition"
+                        title="Calcular combinación alternativa">🔄</button>
+                <button onclick="prepararEImprimir()"
+                        class="bg-slate-900 text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:bg-slate-700 transition">
+                  🖨️ IMPRIMIR REPORTE
+                </button>
+              </div>
+            </div>
+
+            <div id="contenedorSugeridos"
+                 class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-6"
+                 aria-live="polite"></div>
+
+            <div id="footerTotals"
+                 class="bg-white border-t border-slate-200 p-6 shadow-md rounded-2xl no-print">
+              <div class="max-w-4xl mx-auto grid grid-cols-2 gap-8">
+                <div class="flex flex-col text-center md:text-left">
+                  <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">TOTAL COMBINACIÓN</span>
+                  <span id="labelTotal" class="text-3xl font-bold text-blue-900">$ 0,00</span>
+                </div>
+                <div class="flex flex-col border-l border-slate-100 pl-8 text-center md:text-left">
+                  <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">DIFERENCIA FINAL</span>
+                  <span id="labelDiferencia" class="text-3xl font-bold">$ 0,00</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Estado vacío -->
+          <div id="emptyState" class="text-center py-32 text-slate-300 no-print">
+            <p class="italic text-lg">Definí un tope y cargá facturas.</p>
+          </div>
+
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       FOOTER
+  ════════════════════════════════════════════════════════════════════════ -->
+  <footer class="h-10 bg-white border-t flex items-center justify-center text-[10px] font-bold text-slate-400 no-print tracking-widest uppercase">
+    &copy; 2026 DEVSOHFTT STUDIO | TODOS LOS DERECHOS RESERVADOS
+  </footer>
+
+  <!-- Toast de notificaciones -->
+  <div id="toast" role="alert" aria-live="assertive"></div>
+
+  <!-- Lógica cliente -->
+<?!= include('client/styles/global.css') ?>
+<?!= include('client/scripts/ui-logic.js') ?>
+
+</body>
+</html>

@@ -1,0 +1,589 @@
+<script>
+'use strict'; // Fuerza a JavaScript a ejecutarse en modo estricto, previniendo errores silenciosos (ej: variables no declaradas).
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: CONSTANTES
+// ════════════════════════════════════════════════════════════════════════════
+
+/** * Clave única usada para persistir y recuperar el estado en el localStorage del navegador.
+ * Mantenerla como constante evita errores de tipeo en las llamadas de lectura/escritura.
+ * @constant {string}
+ */
+const CACHE_KEY = 'rindefact_data';
+
+/** * Prefijo utilizado al generar identificadores únicos para las facturas.
+ * @constant {string}
+ */
+const ID_PREFIX = 'f-';
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: ESTADO GLOBAL DE LA APLICACIÓN
+// Centraliza los datos en memoria. La UI es un reflejo de este estado.
+// ════════════════════════════════════════════════════════════════════════════
+
+/** * Lista principal en memoria de todas las facturas cargadas en la sesión.
+ * @type {Array<{id: string, monto: number, detalle: string}>} 
+ */
+let facturas = [];
+
+/** * Almacena únicamente los IDs de las facturas que el usuario seleccionó manualmente.
+ * @type {string[]} 
+ */
+let seleccionManualIds = [];
+
+/** * Rastrea si hay alguna factura en modo edición. 
+ * Contiene el ID de la factura, o `null` si la aplicación está en estado de reposo.
+ * @type {string|null} 
+ */
+let editandoId = null;
+
+/**
+ * Semilla de entropía para el algoritmo automático. 
+ * Se incrementa cuando el usuario presiona el botón 🔄 para forzar al backend 
+ * a mezclar el array y devolver una combinación matemáticamente alternativa.
+ * @type {number}
+ */
+let seed = 0;
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: UTILIDADES (Helpers)
+// Funciones puras o de apoyo genérico utilizadas en el resto del código.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Genera un identificador único pseudo-aleatorio basado en el tiempo actual (Epoch).
+ * Es fundamental para que React/Vanilla JS identifique los nodos al renderizar.
+ * @returns {string} Ejemplo: "f-1718300000000"
+ */
+function generarId() {
+  return ID_PREFIX + Date.now();
+}
+
+/**
+ * Recibe un valor numérico y lo devuelve formateado visualmente como moneda argentina.
+ * Utiliza la API nativa Intl.NumberFormat implícita en toLocaleString.
+ * @param {number} valor - El monto matemático (ej: 1234.5)
+ * @returns {string} String visual (ej: "$ 1.234,50")
+ */
+function formatearMoneda(valor) {
+  return '$ ' + valor.toLocaleString('es-AR', { minimumFractionDigits: 2 });
+}
+
+/**
+ * Muestra una notificación temporal (Toast) en la pantalla y la oculta automáticamente.
+ * Reinicia el temporizador si se llama varias veces seguidas para evitar parpadeos.
+ * @param {string} mensaje - Texto a mostrar al usuario.
+ * @param {'info'|'error'} [tipo='info'] - Define el color/estilo de la notificación.
+ */
+function mostrarToast(mensaje, tipo = 'info') {
+  const el = document.getElementById('toast');
+  el.textContent = mensaje;
+  
+  // Asigna clases CSS de Tailwind combinadas con el estilo de la etiqueta #toast
+  el.className = tipo === 'error' ? 'error show' : 'show';
+  
+  // Limpia cualquier timeout previo para evitar que el toast desaparezca antes de tiempo
+  clearTimeout(el._timeout);
+  
+  // Desaparece después de 3000 ms (3 segundos)
+  el._timeout = setTimeout(() => { el.className = ''; }, 3000);
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: PERSISTENCIA (LocalStorage)
+// Protege el trabajo del usuario ante recargas accidentales de página.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Toma el estado de memoria actual y los valores del formulario, los convierte a JSON
+ * y los guarda en el disco duro del usuario (Navegador).
+ */
+function guardarCache() {
+  // Evitamos leer de más el DOM; capturamos los valores actuales
+  const topeInput    = document.getElementById('topeObjetivo').value;
+  const detalleInput = document.getElementById('detalleTope').value;
+  const isManual     = document.getElementById('modoManualToggle').checked;
+
+  const estado = {
+    facturas, // Guarda el array completo de objetos
+    tope: topeInput || '',
+    detalleTope: detalleInput || '',
+    modoManual: isManual,
+    seleccionManualIds
+  };
+  
+  try {
+    // Almacena físicamente el string JSON
+    localStorage.setItem(CACHE_KEY, JSON.stringify(estado));
+  } catch (e) {
+    // Falla de forma silenciosa e informa a consola si el usuario está en modo 
+    // incógnito estricto o si la cuota de almacenamiento se agotó.
+    console.warn('[RindeFact] Limitación de cuota en localStorage o modo incógnito:', e);
+  }
+}
+
+/**
+ * Se dispara al cargar la página (body onload). 
+ * Lee el disco duro y repuebla el estado en memoria y la UI.
+ */
+function cargarDatosCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return; // Si es la primera vez que entra, no hace nada
+
+    // Deserializa la cadena JSON a un objeto JavaScript
+    const estado = JSON.parse(raw);
+    
+    // Asigna el estado recuperado o valores por defecto
+    facturas                                              = estado.facturas            || [];
+    seleccionManualIds                                    = estado.seleccionManualIds  || [];
+    document.getElementById('topeObjetivo').value         = estado.tope               || '';
+    document.getElementById('detalleTope').value          = estado.detalleTope        || '';
+    document.getElementById('modoManualToggle').checked   = estado.modoManual         || false;
+  } catch (e) {
+    // Si el JSON está mal formado o corrupto, limpiaremos la caché para evitar que la app crashee en bucle
+    console.warn('[RindeFact] Caché inválida, iniciando estado vacío:', e);
+    localStorage.removeItem(CACHE_KEY);
+  } finally {
+    // El bloque finally se ejecuta SIEMPRE (haya error o no). 
+    // Sincroniza la vista inicial basada en lo que acabamos de cargar en memoria.
+    _sincronizarModo();
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: GESTIÓN CRUD DE FACTURAS (Crear, Leer, Actualizar, Borrar)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Función disparada al presionar "Enter" o el botón "+".
+ * Lee los inputs, valida y añade un objeto al array global.
+ */
+function agregarFactura() {
+  const inputMonto   = document.getElementById('montoFactura');
+  const inputDetalle = document.getElementById('detalleFactura');
+  const monto        = parseFloat(inputMonto.value);
+
+  // Validación temprana: Impide procesar facturas gratuitas o valores nulos
+  if (!monto || monto <= 0) {
+    mostrarToast('Ingresá un monto válido mayor a 0.', 'error');
+    inputMonto.focus(); // Retorna el cursor al input con error
+    return;
+  }
+
+  // Modifica el estado: Añade el nuevo comprobante al final de la lista
+  facturas.push({
+    id:      generarId(),
+    monto:   monto,
+    detalle: inputDetalle.value.trim().toUpperCase() || 'FACTURA SIN NOMBRE'
+  });
+
+  // Limpia los inputs para la siguiente carga
+  inputMonto.value   = '';
+  inputDetalle.value = '';
+
+  // Cadena de actualización de la UI
+  guardarCache();
+  renderizarListaPrincipal();
+  recalcular();
+  inputDetalle.focus(); // Optimización UX: Mantiene el flujo de tipeo del usuario
+}
+
+/**
+ * Elimina permanentemente una factura del estado en memoria.
+ * @param {string} id - Identificador de la factura a borrar
+ */
+function borrarFactura(id) {
+  // Filtra descartando el id suministrado en ambos arrays
+  facturas           = facturas.filter(f => f.id !== id);
+  seleccionManualIds = seleccionManualIds.filter(mid => mid !== id);
+  
+  // Sincroniza persistencia y UI
+  guardarCache();
+  renderizarListaPrincipal();
+  recalcular();
+}
+
+/**
+ * Convierte la tarjeta de la factura en un pequeño formulario para modificarla.
+ * @param {string} id - Identificador de la factura
+ */
+function activarEdicion(id) {
+  editandoId = id; // Marca cuál es la factura activa
+  _toggleBloqueo(true); // Bloquea el resto de la interfaz para evitar colisiones
+  renderizarListaPrincipal(); // Re-renderiza para mostrar el modo edición
+}
+
+/** Restaura la UI descartando cualquier cambio no guardado en modo edición. */
+function cancelarEdicion() {
+  editandoId = null;
+  _toggleBloqueo(false);
+  renderizarListaPrincipal();
+}
+
+/**
+ * Valida y guarda los cambios ingresados en el formulario de edición en línea.
+ * @param {string} id - Identificador de la factura editada
+ */
+function guardarEdicion(id) {
+  const nuevoDetalle = document.getElementById(`edit-det-${id}`).value.trim().toUpperCase();
+  const nuevoMonto   = parseFloat(document.getElementById(`edit-mon-${id}`).value);
+
+  // Valida que el nuevo monto siga siendo positivo
+  if (!nuevoMonto || nuevoMonto <= 0) {
+    mostrarToast('El monto debe ser mayor a 0.', 'error');
+    return;
+  }
+
+  // Busca dónde está posicionada la factura en el array global
+  const indice = facturas.findIndex(f => f.id === id);
+  if (indice !== -1) {
+    // Aplica las mutaciones directo al objeto
+    facturas[indice].detalle = nuevoDetalle || 'FACTURA SIN NOMBRE';
+    facturas[indice].monto   = nuevoMonto;
+  }
+
+  // Cierra el modo edición y recalcula toda la matemática
+  cancelarEdicion();
+  recalcular();
+}
+
+/** Botón de pánico/reinicio: purga toda la app pidiendo doble confirmación. */
+function limpiarTodo() {
+  // Prevención de borrado accidental
+  if (!confirm('¿Estás seguro de que querés borrar todas las facturas y empezar de cero?')) return;
+
+  // Reseteo duro de variables a estado inicial
+  facturas           = [];
+  seleccionManualIds = [];
+  seed               = 0;
+
+  // Limpieza de inputs del DOM
+  document.getElementById('topeObjetivo').value = '';
+  document.getElementById('detalleTope').value  = '';
+
+  // Destruye el registro en el disco
+  localStorage.removeItem(CACHE_KEY);
+  
+  // Restablece la vista vacía
+  renderizarListaPrincipal();
+  _limpiarResultados();
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: MODOS DE OPERACIÓN (Switch Automático / Manual)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Se activa cuando el usuario hace clic en el switch visual superior.
+ */
+function cambiarModo() {
+  _sincronizarModo();
+  guardarCache();
+}
+
+/**
+ * Permite seleccionar/deseleccionar haciendo clic sobre la tarjeta de la factura.
+ * @param {string} id - ID clickeado
+ */
+function toggleSeleccionManual(id) {
+  // Guarda barrera: Si está en modo automático, los clics aquí no hacen nada.
+  if (!document.getElementById('modoManualToggle').checked) return;
+
+  const indice = seleccionManualIds.indexOf(id);
+  // Si no está, lo agrega. Si ya estaba, lo quita (Toggle).
+  if (indice === -1) seleccionManualIds.push(id);
+  else seleccionManualIds.splice(indice, 1);
+
+  guardarCache();
+  renderizarListaPrincipal();
+  recalcular(); // Actualiza la sumatoria local en vivo
+}
+
+/**
+ * (Privada) Control maestro de UI asociado al cambio de modo.
+ * @private
+ */
+function _sincronizarModo() {
+  const isManual = document.getElementById('modoManualToggle').checked;
+  
+  // Limpia selecciones residuales si apagó el modo manual
+  if (!isManual) seleccionManualIds = [];
+  
+  // El botón "Refrescar algoritmo (🔄)" no tiene sentido en manual, lo ocultamos.
+  document.getElementById('btnRefresh').style.display = isManual ? 'none' : 'flex';
+  
+  // Refresca la vista lateral y dispara los cálculos
+  renderizarListaPrincipal();
+  recalcular();
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: RENDERIZADO DEL DOM (Creación de HTML dinámico)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Pinta toda la lista de la izquierda (Sidebar), filtrando las facturas e
+ * insertando el HTML. Esta función se ejecuta en cada pulsación del buscador.
+ */
+function renderizarListaPrincipal() {
+  const container = document.getElementById('listaPrincipal');
+  const busqueda  = document.getElementById('buscador').value.toLowerCase().trim();
+  const isManual  = document.getElementById('modoManualToggle').checked;
+
+  // Reduce el array calculando la suma de todo lo que el usuario ingresó
+  const totalIngresado = facturas.reduce((acc, f) => acc + f.monto, 0);
+  document.getElementById('labelTotalIngresado').textContent = formatearMoneda(totalIngresado);
+
+  // Aplica la búsqueda para mostrar solo lo que coincide con el input text
+  const filtradas = facturas.filter(f => f.detalle.toLowerCase().includes(busqueda));
+  
+  // Transforma el array de objetos en un gran bloque de HTML (String) y lo inyecta al DOM.
+  container.innerHTML = filtradas.map(f =>
+    editandoId === f.id ? _renderFormEdicion(f) : _renderTarjetaFactura(f, isManual)
+  ).join(''); // .join('') elimina las comas inherentes de los arrays de JS
+}
+
+/**
+ * (Privada) Genera el código HTML de una tarjeta visual (estado normal).
+ * @param {Factura} f
+ * @param {boolean} isManual
+ * @returns {string} Código HTML
+ * @private
+ */
+function _renderTarjetaFactura(f, isManual) {
+  // Determina si inyectarle estilos de "seleccionado manualmente"
+  const claseManual  = seleccionManualIds.includes(f.id) ? 'manual-selected' : '';
+  // Si es modo manual, agregamos cursor-pointer (mano) para invitar al click
+  const clasePointer = isManual ? 'cursor-pointer' : '';
+  
+  return `
+    <div id="card-${f.id}"
+         onclick="toggleSeleccionManual('${f.id}')"
+         class="bg-white border rounded-xl p-3 flex justify-between items-center group transition-all shadow-sm ${claseManual} ${clasePointer}">
+      <div class="info-factura overflow-hidden">
+        <p class="text-[9px] text-slate-400 font-extrabold uppercase truncate tracking-tight">${f.detalle}</p>
+        <p class="font-bold text-slate-900 text-sm">${formatearMoneda(f.monto)}</p>
+      </div>
+      <div class="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity no-print">
+        <button onclick="event.stopPropagation(); activarEdicion('${f.id}')"
+                class="p-1.5 hover:bg-slate-100 rounded text-slate-400" title="Editar">✏️</button>
+        <button onclick="event.stopPropagation(); borrarFactura('${f.id}')"
+                class="p-1.5 hover:bg-red-50 rounded text-red-400" title="Eliminar">✕</button>
+      </div>
+    </div>`;
+}
+
+/**
+ * (Privada) Genera el HTML del pequeño bloque de edición superpuesto.
+ * @param {Factura} f
+ * @returns {string} Código HTML
+ * @private
+ */
+function _renderFormEdicion(f) {
+  return `
+    <div class="bg-white border-2 border-blue-900 rounded-xl p-3 shadow-xl z-50 relative no-print">
+      <input type="text"   id="edit-det-${f.id}" value="${f.detalle}"
+             class="w-full mb-1 p-1 text-xs border rounded outline-none focus:border-blue-900">
+      <input type="number" id="edit-mon-${f.id}" value="${f.monto}" step="0.01"
+             class="w-full mb-2 p-1 text-sm font-bold border rounded outline-none focus:border-blue-900"
+             onkeypress="if(event.key==='Enter') guardarEdicion('${f.id}')">
+      <div class="flex gap-2">
+        <button onclick="guardarEdicion('${f.id}')"
+                class="flex-1 bg-blue-900 text-white text-[10px] py-1.5 rounded font-bold uppercase">Guardar</button>
+        <button onclick="cancelarEdicion()"
+                class="flex-1 bg-slate-100 text-[10px] py-1.5 rounded font-bold text-slate-400">Cancelar</button>
+      </div>
+    </div>`;
+}
+
+/**
+ * Recibe la resolución final (sea del backend automático o la sumatoria local) 
+ * y actualiza el panel principal para reflejar los resultados.
+ * @param {Object} resultado - Dto con {suma, idsSeleccionados, diferencia}
+ */
+function actualizarUI(resultado) {
+  const isManual = document.getElementById('modoManualToggle').checked;
+
+  // Resetea todas las clases "tachado" del panel lateral izquierdo
+  document.querySelectorAll('[id^="card-"]').forEach(el => el.classList.remove('tachado'));
+
+  const resBox    = document.getElementById('resultadoBox');
+  const emptyEl   = document.getElementById('emptyState');
+  const sugeridos = document.getElementById('contenedorSugeridos');
+
+  // Si no hay nada seleccionado (y está en automático), mostramos estado vacío.
+  if (resultado.idsSeleccionados.length === 0 && !isManual) {
+    _limpiarResultados();
+    return;
+  }
+
+  // Desoculta los paneles de resultados
+  resBox.classList.remove('hidden');
+  emptyEl.classList.add('hidden');
+
+  // Construye la lista derecha iterando sobre los identificadores ganadores
+  const htmlItems = resultado.idsSeleccionados.map(id => {
+    const f = facturas.find(fact => fact.id === id);
+    if (!f) return '';
+    
+    // Si estamos en automático, "tacha" visualmente la factura en el panel izquierdo (sidebar)
+    if (!isManual) {
+      const card = document.getElementById('card-' + id);
+      if (card) card.classList.add('tachado');
+    }
+    
+    // Genera la fila de resultado
+    return `
+      <div class="flex justify-between items-center px-8 py-4 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition">
+        <span class="text-xs font-bold text-slate-500 uppercase">${f.detalle}</span>
+        <span class="text-lg font-bold text-blue-900 font-mono">${formatearMoneda(f.monto)}</span>
+      </div>`;
+  }).join('');
+
+  // Si se detectó HTML, lo inyecta. Si no, muestra placeholder
+  sugeridos.innerHTML = htmlItems || '<p class="p-8 text-center text-slate-400 italic">Sin selección</p>';
+
+  // Escribe los totales grandes inferiores
+  document.getElementById('labelTotal').textContent = formatearMoneda(resultado.suma);
+
+  // Parsea la diferencia, inyecta su signo (+ o -) y define colores dinámicamente
+  const difLabel = document.getElementById('labelDiferencia');
+  const difValor = parseFloat(resultado.diferencia);
+  difLabel.textContent = `${difValor >= 0 ? '+' : '-'} ${formatearMoneda(Math.abs(difValor))}`;
+  difLabel.className   = `text-3xl font-bold ${difValor >= 0 ? 'text-pink-alert' : 'text-red-600'}`;
+}
+
+/**
+ * (Privada) Apaga el bloque de "Resultados" y enciende el texto de "Sin contenido".
+ * @private
+ */
+function _limpiarResultados() {
+  document.getElementById('resultadoBox').classList.add('hidden');
+  document.getElementById('emptyState').classList.remove('hidden');
+}
+
+/**
+ * (Privada) Oscurece e inutiliza el bloque derecho temporalmente.
+ * Se usa durante carga web (Google.script.run) y ediciones inline.
+ * @param {boolean} bloquear
+ * @private
+ */
+function _toggleBloqueo(bloquear) {
+  document.getElementById('mainPanel').classList.toggle('disabled-overlay', bloquear);
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: MOTOR DE CÁLCULO Y COMUNICACIÓN CON BACKEND (Client-Server)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Actúa como orquestador. Dependiendo de los switches, ejecuta la lógica 
+ * en el navegador (local) o manda una petición AJAX al servidor de Google.
+ * @param {boolean} [isRefresh=false] - Indica si el usuario presionó el botón 🔄.
+ */
+function recalcular(isRefresh = false) {
+  const tope = parseFloat(document.getElementById('topeObjetivo').value) || 0;
+  const isManual = document.getElementById('modoManualToggle').checked;
+
+  guardarCache(); // Protegemos estado antes de cualquier llamada
+
+  // Si es manual, no gastamos cuota del servidor de Google
+  if (isManual) {
+    _calcularModoManual(tope);
+    return;
+  }
+
+  // Pre-filtro: Si no hay facturas o no hay un tope lógico, no sirve calcular.
+  if (facturas.length === 0 || tope <= 0) {
+    _limpiarResultados();
+    return;
+  }
+
+  // Activa feedback visual de que el sistema está pensando
+  document.getElementById('resultadoBox').classList.add('disabled-overlay');
+
+  // Manejo de la semilla para forzar diversidad algorítmica
+  if (isRefresh) seed++;
+  else seed = 0;
+
+  // Petición Asíncrona a Google Apps Script (src/server/optimizer.js)
+  google.script.run
+    .withSuccessHandler((resultado) => {
+      // Callback: Lo que ocurre cuando el servidor responde con éxito (200 OK)
+      document.getElementById('resultadoBox').classList.remove('disabled-overlay');
+      actualizarUI(resultado);
+    })
+    .withFailureHandler((error) => {
+      // Callback: Lo que ocurre en caso de timeout o caída de Google (500)
+      document.getElementById('resultadoBox').classList.remove('disabled-overlay');
+      _manejarErrorBackend(error);
+    })
+    .calcularMejorCombinacion(facturas, tope, seed); // Nombre explícito de la función en server
+}
+
+/**
+ * (Privada) Versión offline y ultra ligera del optimizador para el modo Manual.
+ * @param {number} tope
+ * @private
+ */
+function _calcularModoManual(tope) {
+  // Solo se queda con las facturas cuyo ID esté en el array de seleccionados
+  const seleccionadas = facturas.filter(f => seleccionManualIds.includes(f.id));
+  const suma          = seleccionadas.reduce((acc, f) => acc + f.monto, 0);
+  
+  // Emula la misma estructura de respuesta (DTO) que enviaría el Backend
+  actualizarUI({
+    suma,
+    idsSeleccionados: seleccionManualIds,
+    diferencia: (tope - suma).toFixed(2)
+  });
+}
+
+/**
+ * (Privada) Centraliza el logueo de errores que vienen del servidor.
+ * @param {Error} error
+ * @private
+ */
+function _manejarErrorBackend(error) {
+  console.error('[RindeFact] Error grave devuelto por Apps Script:', error);
+  mostrarToast('Error al procesar el algoritmo. Intente recargar.', 'error');
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÓDULO: SISTEMA DE IMPRESIÓN (Gestión Nativa Browser)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Función disparada por el botón "Imprimir Reporte".
+ * Enciende/apaga clases CSS y formatea texto para prepararlo antes de 
+ * invocar al driver de la impresora virtual del SO.
+ */
+function prepararEImprimir() {
+  const detalle    = document.getElementById('detalleTope').value;
+  const printTitle = document.getElementById('print-detalleTope');
+  const printFecha = document.getElementById('print-fecha');
+
+  // Si el usuario escribió un título (ej: "RENDICIÓN FEBRERO"), lo mostramos como H1 en papel.
+  if (detalle) {
+    printTitle.textContent = detalle;
+    printTitle.classList.remove('hidden'); // Visible para CSS Media Queries @print
+  } else {
+    printTitle.classList.add('hidden');
+  }
+
+  // Establece la fecha exacta del momento de la impresión visualmente estática.
+  printFecha.textContent = 'Fecha: ' + new Date().toLocaleDateString('es-AR');
+  
+  // Detiene el flujo JS y abre la pre-visualización de impresión nativa de Chrome/Safari.
+  window.print();
+}
+</script>
